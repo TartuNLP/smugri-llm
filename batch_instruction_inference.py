@@ -21,15 +21,18 @@ def write_json(instructions: List[Dict[str, str]], file_path: str):
         json.dump(instructions, f, indent=4, default=str)
 
 
-def get_dataLoader(task, data, batch_size):
+def get_dataLoader(task, data, batch_size, alpaca_prompt_format_path=None):
+
+    if task is None:
+        logging.info(f"Getting general dataloader for task {task}")
+        return InstructionDataset(data, prompt_format_path=alpaca_prompt_format_path)
     if task.lower() == "estqa":
         logging.info("Getting estQA dataloader")
-        val_data = EstQADataset(data)
-    else:
-        logging.info(f"Getting general dataloader for task {task}")
-        val_data = InstructionDataset(data)
+        if alpaca_prompt_format_path is not None:
+            raise NotImplementedError("Custom alpaca prompt not implemented for EstQA")
+        return EstQADataset(data)
 
-    return val_data
+    raise ValueError(f"Unknown task: '{task}'")
 
 def main(
         model_name: str,
@@ -38,6 +41,7 @@ def main(
         output_file: str = "results.txt",
         full_output_file: Optional[str] = None,
         input_format: str = "alpaca",
+        alpaca_prompt_format_path: Optional[str] = None,
         fp16: bool = False,
         bf16: bool = False,
         quantization: bool = False,
@@ -92,7 +96,9 @@ def main(
                 load_in_8bit=quantization,
                 device_map="auto",
                 return_dict=True,
-                low_cpu_mem_usage=True)
+                low_cpu_mem_usage=True,
+                torch_dtype=torch.bfloat16 if bf16 else torch.float16 if fp16 else None
+            )
 
     else:
         logging.info("Loading sharded model")
@@ -139,7 +145,7 @@ def main(
     tokenizer.pad_token_id = 0
 
     if input_format == "alpaca":
-        val_data = get_dataLoader(task, data, batch_size)
+        val_data = get_dataLoader(task, data, batch_size, alpaca_prompt_format_path=alpaca_prompt_format_path)
     elif input_format == "chat":
         val_data = ChatDataset(data, tokenizer)
     else:
@@ -155,7 +161,7 @@ def main(
 
     full_output = []
     translations = []
-    with open(output_file, "w", encoding="utf-8") as f:
+    with open(output_file, "w", encoding="utf-8", buffering=1) as f:
         for data_batch in tqdm(val_dataloader):
             """
             We pad to the longest sequence in the batch and not truncate at all because we are confident

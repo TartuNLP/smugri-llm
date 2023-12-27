@@ -1,4 +1,10 @@
+import logging
+
 from torch.utils.data import Dataset
+
+from utils import read_json
+
+logger = logging.getLogger(__name__)
 
 PROMPT_DICT = {
     "prompt_input": (
@@ -14,8 +20,14 @@ PROMPT_DICT = {
 }
 
 class InstructionDataset(Dataset):
-    def __init__(self, data):
+    def __init__(self, data, prompt_format_path: str = None):
         self.data = data
+
+        self.prompt_format = PROMPT_DICT
+
+        if prompt_format_path is not None:
+            self.prompt_format = read_json(prompt_format_path)
+            logger.info(f"Prompt format loaded from {prompt_format_path}:\n{self.prompt_format}")
 
     def __len__(self):
         return len(self.data)
@@ -24,9 +36,9 @@ class InstructionDataset(Dataset):
         item = self.data[index]
 
         if item.get("input", "") == "":
-            prompt = PROMPT_DICT["prompt_no_input"].format_map(item)
+            prompt = self.prompt_format["prompt_no_input"].format_map(item)
         else:
-            prompt = PROMPT_DICT["prompt_input"].format_map(item)
+            prompt = self.prompt_format["prompt_input"].format_map(item)
 
         if "output" not in item:
             return {"prompts": prompt}

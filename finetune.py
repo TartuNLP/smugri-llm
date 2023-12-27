@@ -27,7 +27,7 @@ from training_datasets import InstructionDataset, ConstantLengthDataset, ChatDat
 @dataclass
 class ScriptArguments:
     train_path: str = field(metadata={"help": "Training data path"})
-    valid_path: str = field(metadata={"help": "Validation data path"})
+    valid_path: Optional[str] = field(metadata={"help": "Validation data path"}, default=None)
     train_dataset_type: str = field(
         default="alpaca",
         metadata={"help": "Training dataset type"}
@@ -183,6 +183,9 @@ def create_dataset(tokenizer: LlamaTokenizer, args: ScriptArguments, dataset_typ
 
 def create_datasets(tokenizer: LlamaTokenizer, args: ScriptArguments):
     train_dataset = create_dataset(tokenizer, args, args.train_dataset_type, args.train_path, seed=training_args.seed)
+    if args.valid_path is None:
+        return train_dataset, None
+
     valid_dataset = create_dataset(tokenizer, args, args.valid_dataset_type, args.valid_path, seed=training_args.seed)
     return train_dataset, valid_dataset
 
@@ -381,7 +384,11 @@ def main(script_args: ScriptArguments, training_args: TrainingArguments, quantiz
     except:
         logging.info(f"Train dataset with unknown number of examples")
 
-    logging.info(f"Validation dataset with {len(eval_dataset)} examples")
+    if eval_dataset is not None:
+        logging.info(f"Validation dataset with {len(eval_dataset)} examples")
+    else:
+        logging.info(f"No validation dataset")
+
     logging.info(f"Max sequence length: {tokenizer.model_max_length}")
     trainer = CustomTrainer(
         model=model,
