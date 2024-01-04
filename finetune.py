@@ -53,6 +53,7 @@ class ScriptArguments:
     interleave_probs: Optional[str] = field(default=None)
     torch_dtype: Optional[str] = field(default=None)
     low_cpu_mem_usage: bool = field(default=False)
+    use_flash_attention_2: bool = field(default=False)
 
 
 @dataclass
@@ -223,6 +224,12 @@ def create_and_prepare_model(args: ScriptArguments, training_args: TrainingArgum
     else:
         torch_dtype = getattr(torch, args.torch_dtype)
 
+    model_kwargs = {}
+
+    if args.use_flash_attention_2:
+        logging.info("Using Flash Attention 2")
+        model_kwargs["use_flash_attention_2"] = args.use_flash_attention_2
+
     model = LlamaForCausalLM.from_pretrained(
         args.model_name,
         torch_dtype=torch_dtype,
@@ -232,6 +239,7 @@ def create_and_prepare_model(args: ScriptArguments, training_args: TrainingArgum
         use_cache=not training_args.gradient_checkpointing,
         trust_remote_code=True,
         low_cpu_mem_usage=args.low_cpu_mem_usage,
+        **model_kwargs,
     )
 
     peft_config = None
