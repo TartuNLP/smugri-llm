@@ -130,7 +130,7 @@ def create_dataset(tokenizer: LlamaTokenizer, args: ScriptArguments, dataset_typ
             logging.info(f"Loading {ds_path}")
             if ":" in ds_path:
                 ds_name, lang = ds_path.split(":")
-                culturax_dataset = load_dataset(ds_name, language=lang, streaming=True, split="train")
+                culturax_dataset = load_dataset(ds_name, lang, streaming=True, split="train")
             else:
                 culturax_dataset = load_dataset(ds_path, streaming=True, split="train")
             culturax_datasets.append(culturax_dataset)
