@@ -7,17 +7,17 @@ import random
 import sys
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 from datasets import interleave_datasets, load_dataset
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, get_peft_model, PeftModel
 from peft.tuners.lora import LoraLayer
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
 from transformers import HfArgumentParser, TrainingArguments, Trainer, LlamaForCausalLM, LlamaTokenizer, \
-    default_data_collator, DataCollatorForSeq2Seq, get_polynomial_decay_schedule_with_warmup
+    default_data_collator, DataCollatorForSeq2Seq, get_polynomial_decay_schedule_with_warmup, PreTrainedModel
 from torch.utils.data import Dataset
 from transformers.utils import PaddingStrategy
 
@@ -58,6 +58,10 @@ class ScriptArguments:
 
 @dataclass
 class LoraArguments:
+    peft_name: Optional[str] = field(
+        default=None,
+        metadata={"help": "The pre-trained PEFT model name"}
+    )
     use_peft_lora: Optional[bool] = field(
         default=False,
         metadata={"help": "Enables PEFT LoRA for training."},
@@ -115,6 +119,7 @@ def get_chars_per_token(dataset: Dataset, tokenizer: LlamaTokenizer, data_column
 
 def create_dataset(tokenizer: LlamaTokenizer, args: ScriptArguments, dataset_type: str, path: str, seed: int):
     if dataset_type == "alpaca":
+        logging.info(f"Loading dataset from: {path}")
         dataset = InstructionDataset(
             data_path=path,
             tokenizer=tokenizer,
@@ -192,7 +197,7 @@ def create_datasets(tokenizer: LlamaTokenizer, args: ScriptArguments):
 
 
 def create_and_prepare_model(args: ScriptArguments, training_args: TrainingArguments, lora_args: LoraArguments,
-                             quant_args: QuantizationArguments):
+                             quant_args: QuantizationArguments) -> Tuple[PreTrainedModel, LlamaTokenizer]:
     device_map = None
     bnb_config = None
     load_in_8bit = quant_args.use_8bit_quantization
@@ -242,21 +247,24 @@ def create_and_prepare_model(args: ScriptArguments, training_args: TrainingArgum
         **model_kwargs,
     )
 
-    peft_config = None
-    if lora_args.use_peft_lora:
+    if lora_args.use_peft_lora or lora_args.peft_name is not None:
         logging.info("Using PEFT LoRA")
-        peft_config = LoraConfig(
-            lora_alpha=lora_args.lora_alpha,
-            lora_dropout=lora_args.lora_dropout,
-            r=lora_args.lora_r,
-            bias="none",
-            task_type="CAUSAL_LM",
-            target_modules=lora_args.lora_target_modules.split(","),
-        )
         if training_args.gradient_checkpointing:
             model.gradient_checkpointing_enable()
 
-        model = get_peft_model(model, peft_config)
+        if lora_args.peft_name is not None:
+            logging.info(f"Loading pre-trained LoRA weights and congfig from {lora_args.peft_name}")
+            model = PeftModel.from_pretrained(model, lora_args.peft_name, is_trainable=True)
+        else:
+            peft_config = LoraConfig(
+                lora_alpha=lora_args.lora_alpha,
+                lora_dropout=lora_args.lora_dropout,
+                r=lora_args.lora_r,
+                bias="none",
+                task_type="CAUSAL_LM",
+                target_modules=lora_args.lora_target_modules.split(","),
+            )
+            model = get_peft_model(model, peft_config)
         model.print_trainable_parameters()
 
     tokenizer = LlamaTokenizer.from_pretrained(
@@ -264,7 +272,12 @@ def create_and_prepare_model(args: ScriptArguments, training_args: TrainingArgum
         model_max_length=args.max_seq_length,
         padding_side="right",
     )
+    if tokenizer.pad_token_id is not None:
+        logging.info(f"Tokenizer pad_token_id={tokenizer.pad_token_id}")
+        return model, tokenizer
+
     if args.use_new_pad_token:
+        logging.info("No pad token found, adding <pad> to vocabulary")
         tokenizer.add_special_tokens(
             {
                 "pad_token": "<pad>",
@@ -275,9 +288,10 @@ def create_and_prepare_model(args: ScriptArguments, training_args: TrainingArgum
         model.model.padding_idx = tokenizer.pad_token_id
         model.model.embed_tokens.padding_idx = tokenizer.pad_token_id
     else:
+        logging.info("No pad token found, using pad_token_id=0")
         tokenizer.pad_token_id = 0
 
-    return model, peft_config, tokenizer
+    return model, tokenizer
 
 
 def peft_module_casting_to_bf16(model, args: TrainingArguments):
@@ -368,7 +382,7 @@ def main(script_args: ScriptArguments, training_args: TrainingArguments, quantiz
     torch.manual_seed(training_args.seed)
     random.seed(training_args.seed)
 
-    model, peft_config, tokenizer = create_and_prepare_model(
+    model, tokenizer = create_and_prepare_model(
         script_args, training_args, lora_args, quantization_args
     )
     model.config.use_cache = False
