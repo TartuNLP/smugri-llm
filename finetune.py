@@ -54,6 +54,7 @@ class ScriptArguments:
     torch_dtype: Optional[str] = field(default=None)
     low_cpu_mem_usage: bool = field(default=False)
     use_flash_attention_2: bool = field(default=False)
+    save_final_model: bool = field(default=False)
 
 
 @dataclass
@@ -429,7 +430,9 @@ def main(script_args: ScriptArguments, training_args: TrainingArguments, quantiz
     if trainer.is_fsdp_enabled:
         trainer.accelerator.state.fsdp_plugin.set_state_dict_type("FULL_STATE_DICT")
 
-    trainer.save_model(training_args.output_dir)
+    if script_args.save_final_model:
+        trainer.save_model(training_args.output_dir)
+        tokenizer.save_pretrained(training_args.output_dir)
 
 
 if __name__ == "__main__":
