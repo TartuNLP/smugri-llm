@@ -191,10 +191,10 @@ def main(
                 prediction = tokenizer.decode(output[len(batch["input_ids"][ix]):], skip_special_tokens=True)
                 raw_output = prediction
 
-                if("\n" in prediction):
-                    logging.debug(f"Found newline in prediction {ix}")
+                if "\n" in prediction:
+                    logging.info(f"Found newline in prediction {ix}")
 
-                prediction = prediction.replace("\n", " ").strip()
+                prediction = " ".join(map(str.strip, prediction.splitlines())).strip()
                 translations.append(prediction)
                 f.write(prediction + "\n")
 
