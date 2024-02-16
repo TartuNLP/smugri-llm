@@ -13,4 +13,3 @@ py7zr
 scipy
 optimum
 wandb
-sacremoses
