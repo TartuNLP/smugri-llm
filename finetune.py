@@ -16,8 +16,10 @@ from peft.tuners.lora import LoraLayer
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
-from transformers import HfArgumentParser, TrainingArguments, Trainer, LlamaForCausalLM, LlamaTokenizer, \
-    default_data_collator, DataCollatorForSeq2Seq, get_polynomial_decay_schedule_with_warmup, PreTrainedModel
+from transformers import HfArgumentParser, TrainingArguments, Trainer, AutoModelForCausalLM, AutoTokenizer, \
+    PreTrainedTokenizer, default_data_collator, DataCollatorForSeq2Seq, get_polynomial_decay_schedule_with_warmup, \
+    PreTrainedModel
+
 from torch.utils.data import Dataset
 from transformers.utils import PaddingStrategy
 
@@ -105,7 +107,7 @@ class QuantizationArguments:
 
 
 # https://github.com/pacman100/DHS-LLM-Workshop/blob/main/chat_assistant/training/utils.py#L116C1-L125C43
-def get_chars_per_token(dataset: Dataset, tokenizer: LlamaTokenizer, data_column: str, nb_examples: int = 500):
+def get_chars_per_token(dataset: Dataset, tokenizer: PreTrainedTokenizer, data_column: str, nb_examples: int = 500):
     """
     Estimate the average number of characters per token in the dataset.
     """
@@ -118,7 +120,7 @@ def get_chars_per_token(dataset: Dataset, tokenizer: LlamaTokenizer, data_column
     return total_characters / total_tokens
 
 
-def create_dataset(tokenizer: LlamaTokenizer, args: ScriptArguments, dataset_type: str, path: str, seed: int):
+def create_dataset(tokenizer: PreTrainedTokenizer, args: ScriptArguments, dataset_type: str, path: str, seed: int):
     if dataset_type == "alpaca":
         logging.info(f"Loading dataset from: {path}")
         dataset = InstructionDataset(
@@ -188,7 +190,7 @@ def create_dataset(tokenizer: LlamaTokenizer, args: ScriptArguments, dataset_typ
     return dataset
 
 
-def create_datasets(tokenizer: LlamaTokenizer, args: ScriptArguments):
+def create_datasets(tokenizer: PreTrainedTokenizer, args: ScriptArguments):
     train_dataset = create_dataset(tokenizer, args, args.train_dataset_type, args.train_path, seed=training_args.seed)
     if args.valid_path is None:
         return train_dataset, None
@@ -198,7 +200,7 @@ def create_datasets(tokenizer: LlamaTokenizer, args: ScriptArguments):
 
 
 def create_and_prepare_model(args: ScriptArguments, training_args: TrainingArguments, lora_args: LoraArguments,
-                             quant_args: QuantizationArguments) -> Tuple[PreTrainedModel, LlamaTokenizer]:
+                             quant_args: QuantizationArguments) -> Tuple[PreTrainedModel, PreTrainedTokenizer]:
     device_map = None
     bnb_config = None
     load_in_8bit = quant_args.use_8bit_quantization
@@ -234,9 +236,9 @@ def create_and_prepare_model(args: ScriptArguments, training_args: TrainingArgum
 
     if args.use_flash_attention_2:
         logging.info("Using Flash Attention 2")
-        model_kwargs["use_flash_attention_2"] = args.use_flash_attention_2
+        model_kwargs["attn_implementation"] = "flash_attention_2"
 
-    model = LlamaForCausalLM.from_pretrained(
+    model = AutoModelForCausalLM.from_pretrained(
         args.model_name,
         torch_dtype=torch_dtype,
         load_in_8bit=load_in_8bit,
@@ -268,7 +270,7 @@ def create_and_prepare_model(args: ScriptArguments, training_args: TrainingArgum
             model = get_peft_model(model, peft_config)
         model.print_trainable_parameters()
 
-    tokenizer = LlamaTokenizer.from_pretrained(
+    tokenizer = AutoTokenizer.from_pretrained(
         args.model_name if args.tokenizer_name is None else args.tokenizer_name,
         model_max_length=args.max_seq_length,
         padding_side="right",

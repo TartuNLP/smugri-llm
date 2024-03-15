@@ -5,7 +5,7 @@ import random
 
 import torch
 from torch.utils.data import Dataset, IterableDataset
-from transformers import LlamaTokenizer
+from transformers import LlamaTokenizer, PreTrainedTokenizer
 
 from utils import read_json
 
@@ -19,7 +19,7 @@ class ChatDataset(Dataset):
     USER_PREFIX = "<|user|>\n"
     USER_SUFFIX = "\n"
 
-    def __init__(self, data_path: str, tokenizer: LlamaTokenizer):
+    def __init__(self, data_path: str, tokenizer: PreTrainedTokenizer):
         self.dataset = read_json(data_path)
         self.tokenizer = tokenizer
 
@@ -216,7 +216,7 @@ PROMPT_DICT = {
 
 
 class InstructionDataset(Dataset):
-    def __init__(self, data_path: str, tokenizer: LlamaTokenizer, padding=True, prompt_format_path: str = None):
+    def __init__(self, data_path: str, tokenizer: PreTrainedTokenizer, padding=True, prompt_format_path: str = None):
         self.dataset = read_json(data_path)
         self.padding = padding
         self.tokenizer = tokenizer
