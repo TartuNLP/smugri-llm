@@ -129,6 +129,7 @@ def create_dataset(
         split: str = "train",
         infinite_packed_dataset: bool = False,
         interleave_stopping_strategy: Literal["first_exhausted", "all_exhausted"] = "all_exhausted",
+        packed_ds_shuffling: bool = True,
 ):
     if dataset_type == "alpaca":
         logging.info(f"Loading dataset from: {path}")
@@ -185,7 +186,7 @@ def create_dataset(
             seq_length=args.max_seq_length,
             chars_per_token=chars_per_token,
             dataset_text_field="text",
-            shuffle=True,
+            shuffle=packed_ds_shuffling,
         )
     elif dataset_type == "chat":
         if not args.use_dynamic_padding and not args.disable_padding:
@@ -203,7 +204,9 @@ def create_dataset(
 
 
 def create_datasets(tokenizer: PreTrainedTokenizer, args: ScriptArguments):
-    train_dataset = create_dataset(tokenizer, args, args.train_dataset_type, args.train_path, seed=training_args.seed)
+    train_dataset = create_dataset(
+        tokenizer, args, args.train_dataset_type, args.train_path, seed=training_args.seed, packed_ds_shuffling=True
+    )
     if args.valid_path is None:
         return train_dataset, None
 
@@ -227,7 +230,7 @@ def create_datasets(tokenizer: PreTrainedTokenizer, args: ScriptArguments):
     else:
         valid_dataset = create_dataset(
             tokenizer, args, args.valid_dataset_type, args.valid_path,
-            seed=training_args.seed, split="validation", infinite_packed_dataset=False
+            seed=training_args.seed, split="validation", infinite_packed_dataset=False, packed_ds_shuffling=False
         )
     return train_dataset, valid_dataset
 
