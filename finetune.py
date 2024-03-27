@@ -7,7 +7,7 @@ import random
 import sys
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Literal
 
 import torch
 from datasets import interleave_datasets, load_dataset
@@ -120,7 +120,16 @@ def get_chars_per_token(dataset: Dataset, tokenizer: PreTrainedTokenizer, data_c
     return total_characters / total_tokens
 
 
-def create_dataset(tokenizer: PreTrainedTokenizer, args: ScriptArguments, dataset_type: str, path: str, seed: int):
+def create_dataset(
+        tokenizer: PreTrainedTokenizer,
+        args: ScriptArguments,
+        dataset_type: str,
+        path: str,
+        seed: int,
+        split: str = "train",
+        infinite_packed_dataset: bool = False,
+        interleave_stopping_strategy: Literal["first_exhausted", "all_exhausted"] = "all_exhausted",
+):
     if dataset_type == "alpaca":
         logging.info(f"Loading dataset from: {path}")
         dataset = InstructionDataset(
@@ -138,9 +147,9 @@ def create_dataset(tokenizer: PreTrainedTokenizer, args: ScriptArguments, datase
             logging.info(f"Loading {ds_path}")
             if ":" in ds_path:
                 ds_name, lang = ds_path.split(":")
-                culturax_dataset = load_dataset(ds_name, lang, streaming=True, split="train")
+                culturax_dataset = load_dataset(ds_name, lang, streaming=True, split=split)
             else:
-                culturax_dataset = load_dataset(ds_path, streaming=True, split="train")
+                culturax_dataset = load_dataset(ds_path, streaming=True, split=split)
             culturax_datasets.append(culturax_dataset)
 
         if len(culturax_datasets) == 0:
@@ -157,11 +166,14 @@ def create_dataset(tokenizer: PreTrainedTokenizer, args: ScriptArguments, datase
 
             logging.info(f"Interleave probabilities: {interleave_probs}")
 
+            for ds_path, prob in zip(dataset_paths, interleave_probs):
+                logging.info(f"Sampling probability for {ds_path}: {prob}")
+
             raw_dataset = interleave_datasets(
                 culturax_datasets,
                 probabilities=interleave_probs,
                 seed=seed,
-                stopping_strategy="all_exhausted"
+                stopping_strategy=interleave_stopping_strategy
             )
 
         chars_per_token = get_chars_per_token(raw_dataset, tokenizer, "text")
@@ -169,7 +181,7 @@ def create_dataset(tokenizer: PreTrainedTokenizer, args: ScriptArguments, datase
         dataset = ConstantLengthDataset(
             tokenizer,
             raw_dataset,
-            infinite=True,
+            infinite=infinite_packed_dataset,
             seq_length=args.max_seq_length,
             chars_per_token=chars_per_token,
             dataset_text_field="text",
@@ -195,7 +207,28 @@ def create_datasets(tokenizer: PreTrainedTokenizer, args: ScriptArguments):
     if args.valid_path is None:
         return train_dataset, None
 
-    valid_dataset = create_dataset(tokenizer, args, args.valid_dataset_type, args.valid_path, seed=training_args.seed)
+    if "," in args.valid_path:
+        raw_valid_paths = args.valid_path.split(",")
+        if any(":" not in path for path in raw_valid_paths):
+            raise ValueError(
+                "Invalid valid path format, expected format: `dataset_name:path`"
+                " when multiple validation datasets are provided"
+            )
+
+        valid_dataset = {}
+        for path in raw_valid_paths:
+            ds_name, ds_path = path.split(":")
+            if ds_name in valid_dataset:
+                raise ValueError(f"Duplicate dataset name: {ds_name}")
+            valid_dataset[ds_name] = create_dataset(
+                tokenizer, args, args.valid_dataset_type, ds_path, seed=training_args.seed, split="validation"
+            )
+
+    else:
+        valid_dataset = create_dataset(
+            tokenizer, args, args.valid_dataset_type, args.valid_path,
+            seed=training_args.seed, split="validation", infinite_packed_dataset=False
+        )
     return train_dataset, valid_dataset
 
 
@@ -379,6 +412,22 @@ class CustomTrainer(Trainer):
         return super().create_scheduler(num_training_steps, optimizer)
 
 
+def _log_dataset_info(ds, split):
+    if ds is None:
+        logging.info(f"No {split} dataset")
+    elif isinstance(ds, dict):
+        for k, v in ds.items():
+            try:
+                logging.info(f"Prepared {split} dataset {k} with {len(v)} examples")
+            except:
+                logging.info(f"Prepared {split} dataset {k} with unknown number of examples")
+    else:
+        try:
+            logging.info(f"Prepared {split} dataset with {len(ds)} examples")
+        except:
+            logging.info(f"Prepared {split} dataset with unknown number of examples")
+
+
 def main(script_args: ScriptArguments, training_args: TrainingArguments, quantization_args: QuantizationArguments,
          lora_args: LoraArguments):
     torch.cuda.manual_seed(training_args.seed)
@@ -404,15 +453,8 @@ def main(script_args: ScriptArguments, training_args: TrainingArguments, quantiz
         logging.info("Using max length padding to max_seq_length")
         collator = default_data_collator
 
-    try:
-        logging.info(f"Train dataset with {len(train_dataset)} examples")
-    except:
-        logging.info(f"Train dataset with unknown number of examples")
-
-    if eval_dataset is not None:
-        logging.info(f"Validation dataset with {len(eval_dataset)} examples")
-    else:
-        logging.info(f"No validation dataset")
+    _log_dataset_info(train_dataset, "train")
+    _log_dataset_info(eval_dataset, "eval")
 
     logging.info(f"Max sequence length: {tokenizer.model_max_length}")
     trainer = CustomTrainer(
