@@ -1,6 +1,7 @@
 torch>=2.0.1
 git+https://github.com/taidopurason/transformers@LUMI
 accelerate
+trl
 appdirs
 loralib
 black
