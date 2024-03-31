@@ -76,6 +76,10 @@ class LoraArguments:
         default="q_proj,k_proj,v_proj,o_proj,down_proj,up_proj,gate_proj",
         metadata={"help": "comma separated list of target modules to apply LoRA layers to"},
     )
+    lora_modules_to_save: Optional[str] = field(
+        default=None,
+        metadata={"help": "comma separated list of modules to save/train with LoRA"},
+    )
 
 
 @dataclass
@@ -302,6 +306,7 @@ def create_and_prepare_model(args: ScriptArguments, training_args: TrainingArgum
                 bias="none",
                 task_type="CAUSAL_LM",
                 target_modules=lora_args.lora_target_modules.split(","),
+                modules_to_save=lora_args.lora_modules_to_save.split(",")
             )
             model = get_peft_model(model, peft_config)
         model.print_trainable_parameters()
