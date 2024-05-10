@@ -9,7 +9,9 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import Optional, Tuple, Literal
 
+import datasets
 import torch
+from accelerate import PartialState
 from datasets import interleave_datasets, load_dataset
 from peft import LoraConfig, get_peft_model, PeftModel
 from peft.tuners.lora import LoraLayer
@@ -18,12 +20,12 @@ from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
 from transformers import HfArgumentParser, TrainingArguments, Trainer, AutoModelForCausalLM, AutoTokenizer, \
     PreTrainedTokenizer, default_data_collator, DataCollatorForSeq2Seq, get_polynomial_decay_schedule_with_warmup, \
-    PreTrainedModel
+    PreTrainedModel, TrainerCallback, TrainerControl, TrainerState
 
 from torch.utils.data import Dataset
 from transformers.utils import PaddingStrategy
 
-from training_datasets import InstructionDataset, ConstantLengthDataset, ChatDataset
+from training_datasets import InstructionDataset, ConstantLengthDataset, ChatDataset, PreTokenizedDataset
 
 
 @dataclass
@@ -57,6 +59,9 @@ class ScriptArguments:
     low_cpu_mem_usage: bool = field(default=False)
     use_flash_attention_2: bool = field(default=False)
     save_final_model: bool = field(default=False)
+    wrap_dataset_with_hf: bool = field(default=False)
+    force_end_save_and_evaluate: bool = field(default=False)
+
 
 
 @dataclass
@@ -134,6 +139,7 @@ def create_dataset(
         infinite_packed_dataset: bool = False,
         interleave_stopping_strategy: Literal["first_exhausted", "all_exhausted"] = "all_exhausted",
         packed_ds_shuffling: bool = True,
+        wrap_dataset_with_hf: bool = False,
 ):
     if dataset_type == "alpaca":
         logging.info(f"Loading dataset from: {path}")
@@ -201,15 +207,29 @@ def create_dataset(
             data_path=path,
             tokenizer=tokenizer,
         )
+    elif dataset_type == "pretokenized":
+        dataset = PreTokenizedDataset(
+            path=path,
+        )
     else:
         raise ValueError(f"Unknown dataset type: {dataset_type}")
+
+    if wrap_dataset_with_hf:
+        with PartialState().local_main_process_first():
+            def data_generator(ds_iterator):
+                yield from ds_iterator
+
+            dataset = datasets.Dataset.from_generator(
+                data_generator, gen_kwargs={"ds_iterator": dataset}
+            )
 
     return dataset
 
 
 def create_datasets(tokenizer: PreTrainedTokenizer, args: ScriptArguments):
     train_dataset = create_dataset(
-        tokenizer, args, args.train_dataset_type, args.train_path, seed=training_args.seed, packed_ds_shuffling=True
+        tokenizer, args, args.train_dataset_type, args.train_path, seed=training_args.seed, packed_ds_shuffling=True,
+        wrap_dataset_with_hf=args.wrap_dataset_with_hf
     )
     if args.valid_path is None:
         return train_dataset, None
@@ -224,7 +244,8 @@ def create_datasets(tokenizer: PreTrainedTokenizer, args: ScriptArguments):
 
         valid_dataset = {}
         for path in raw_valid_paths:
-            ds_name, ds_path = path.split(":")
+            ds_name, *ds_path = path.split(":")
+            ds_path = ":".join(ds_path)
             if ds_name in valid_dataset:
                 raise ValueError(f"Duplicate dataset name: {ds_name}")
             valid_dataset[ds_name] = create_dataset(
@@ -354,6 +375,7 @@ def peft_module_casting_to_bf16(model, args: TrainingArguments):
 @dataclass
 class CustomTrainingArguments(TrainingArguments):
     scheduler_lr_end: float = None
+    disable_train_shuffle: bool = False
 
 
 def _get_cosine_schedule_with_warmup_lr_lambda(
@@ -419,6 +441,23 @@ class CustomTrainer(Trainer):
 
         return super().create_scheduler(num_training_steps, optimizer)
 
+    def _get_train_sampler(self) -> Optional[torch.utils.data.Sampler]:
+        if isinstance(self.args, CustomTrainingArguments) and self.args.disable_train_shuffle:
+            logging.info("Disabling training dataset shuffling")
+            return None
+        return super()._get_train_sampler()
+
+
+class EvaluateAndSaveEndCallback(TrainerCallback):
+    def on_step_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+        if state.global_step >= state.max_steps:
+            control.should_evaluate = True
+            control.should_save = True
+
+    def on_epoch_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+        control.should_evaluate = True
+        control.should_save = True
+
 
 def _log_dataset_info(ds, split):
     if ds is None:
@@ -465,12 +504,16 @@ def main(script_args: ScriptArguments, training_args: TrainingArguments, quantiz
     _log_dataset_info(eval_dataset, "eval")
 
     logging.info(f"Max sequence length: {tokenizer.model_max_length}")
+    trainer_kwargs = {}
+    if script_args.force_end_save_and_evaluate:
+        trainer_kwargs["callbacks"] = [EvaluateAndSaveEndCallback()]
     trainer = CustomTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=collator,
+        **trainer_kwargs,
     )
     trainer.accelerator.print(f"{trainer.model}")
     if lora_args.use_peft_lora:

@@ -4,12 +4,14 @@ import warnings
 import random
 
 import torch
+from datasets import load_dataset, load_from_disk
 from torch.utils.data import Dataset, IterableDataset
 from transformers import LlamaTokenizer, PreTrainedTokenizer
 
 from utils import read_json
 
 logger = logging.getLogger(__name__)
+
 
 class ChatDataset(Dataset):
     SYSTEM_PREFIX = "<|system|>\n"
@@ -264,3 +266,14 @@ class InstructionDataset(Dataset):
             "labels": labels,
             "attention_mask": example_mask,
         }
+
+
+class PreTokenizedDataset(Dataset):
+    def __init__(self, path: str):
+        self.dataset = load_from_disk(path)
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, index):
+        return self.dataset[index]
