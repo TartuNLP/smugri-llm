@@ -9,7 +9,7 @@ import sys
 import json
 
 import torch
-from inference_datasets import EstQADataset, ChatDataset, InstructionDataset
+from inference_datasets import EstQADataset, ChatDataset, InstructionDataset, SimpleDataset
 import torch.distributed._shard.checkpoint as dist_cp
 from torch.distributed.checkpoint import FileSystemReader
 from tqdm import tqdm
@@ -21,7 +21,7 @@ def write_json(instructions: List[Dict[str, str]], file_path: str):
         json.dump(instructions, f, indent=4, default=str)
 
 
-def get_dataLoader(task, data, batch_size, alpaca_prompt_format_path=None):
+def get_alpaca_dataset(task, data, alpaca_prompt_format_path=None):
 
     if task is None:
         logging.info(f"Getting general dataloader for task {task}")
@@ -145,9 +145,11 @@ def main(
     tokenizer.pad_token_id = 0
 
     if input_format == "alpaca":
-        val_data = get_dataLoader(task, data, batch_size, alpaca_prompt_format_path=alpaca_prompt_format_path)
+        val_data = get_alpaca_dataset(task, data, alpaca_prompt_format_path=alpaca_prompt_format_path)
     elif input_format == "chat":
         val_data = ChatDataset(data, tokenizer)
+    elif input_format == "simple":
+        val_data = SimpleDataset(data, prompt_field="text")
     else:
         raise ValueError(f"Invalid input format: {input_format}")
 
@@ -203,7 +205,7 @@ def main(
                 if print_output:
                     logging.info(f"input-escaped-{ix}:\t{repr(data_batch['prompts'][ix])}")
                     logging.info(f"raw-output-escaped-{ix}:\t{repr(raw_output)}")
-                    logging.info(f"processed-output-{ix}: {prediction}")
+                    logging.info(f"processed-output-{ix}:\t{prediction}")
 
     if full_output_file is not None:
         write_json(full_output, full_output_file)

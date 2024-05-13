@@ -19,6 +19,7 @@ PROMPT_DICT = {
     ),
 }
 
+
 class InstructionDataset(Dataset):
     def __init__(self, data, prompt_format_path: str = None):
         self.data = data
@@ -40,12 +41,21 @@ class InstructionDataset(Dataset):
         else:
             prompt = self.prompt_format["prompt_input"].format_map(item)
 
-        if "output" not in item:
-            return {"prompts": prompt}
+        return {"prompts": prompt}
 
-        return {"prompts": prompt, "labels": item["output"]}
 
-        
+class SimpleDataset(Dataset):
+    def __init__(self, data, prompt_field: str = "text"):
+        self.data = data
+        self.prompt_field = prompt_field
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, index):
+        return {"prompts": self.data[index][self.prompt_field]}
+
+
 class ChatDataset(Dataset):
     SYSTEM_PREFIX = "<|system|>\n"
     SYSTEM_SUFFIX = "\n"
