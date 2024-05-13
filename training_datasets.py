@@ -1,12 +1,13 @@
 import copy
 import logging
+import os
 import warnings
 import random
 
 import torch
 from datasets import load_dataset, load_from_disk
 from torch.utils.data import Dataset, IterableDataset
-from transformers import LlamaTokenizer, PreTrainedTokenizer
+from transformers import PreTrainedTokenizer
 
 from utils import read_json
 
@@ -21,8 +22,16 @@ class ChatDataset(Dataset):
     USER_PREFIX = "<|user|>\n"
     USER_SUFFIX = "\n"
 
-    def __init__(self, data_path: str, tokenizer: PreTrainedTokenizer):
-        self.dataset = read_json(data_path)
+    def __init__(self, data_path: str, tokenizer: PreTrainedTokenizer, split: str = "train"):
+        logging.info(f"Loading chat dataset from {data_path}")
+        if os.path.isfile(data_path):
+            self.dataset = read_json(data_path)
+        elif ":" in data_path:
+            ds_name, lang = data_path.split(":")
+            self.dataset = list(load_dataset(ds_name, lang)[split])
+        else:
+            self.dataset = list(load_dataset(data_path)[split])
+
         self.tokenizer = tokenizer
 
     def __len__(self):

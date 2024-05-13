@@ -141,8 +141,8 @@ def create_dataset(
         packed_ds_shuffling: bool = True,
         wrap_dataset_with_hf: bool = False,
 ):
+    logging.info(f"Loading dataset from: {path}")
     if dataset_type == "alpaca":
-        logging.info(f"Loading dataset from: {path}")
         dataset = InstructionDataset(
             data_path=path,
             tokenizer=tokenizer,
@@ -206,6 +206,7 @@ def create_dataset(
         dataset = ChatDataset(
             data_path=path,
             tokenizer=tokenizer,
+            split=split,
         )
     elif dataset_type == "pretokenized":
         dataset = PreTokenizedDataset(
