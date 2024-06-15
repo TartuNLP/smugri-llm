@@ -1,6 +1,6 @@
 torch>=2.0.1
-git+https://github.com/taidopurason/transformers@LUMI
-accelerate
+transformers==4.36.2
+accelerate==0.25.0
 trl
 appdirs
 loralib
@@ -14,3 +14,4 @@ py7zr
 scipy
 optimum
 wandb
+sacrebleu
