@@ -9,6 +9,8 @@ import sys
 import json
 
 import torch
+from datasets import load_dataset
+
 from inference_datasets import EstQADataset, ChatDataset, InstructionDataset, SimpleDataset
 import torch.distributed._shard.checkpoint as dist_cp
 from torch.distributed.checkpoint import FileSystemReader
@@ -65,13 +67,24 @@ def main(
         **kwargs
 ):
     start = time.perf_counter()
-    if prompt_file is not None:
-        if not os.path.exists(prompt_file):
-            raise ValueError(f"Prompt file {prompt_file} does not exist.")
+    if prompt_file is None:
+        raise ValueError("No prompt file provided.")
+
+    if os.path.exists(prompt_file):
         with open(prompt_file, "r") as f:
             data = json.load(f)
+    elif ":" in prompt_file:
+        parts = prompt_file.split(":")
+        if len(parts) == 2:
+            name, split = parts
+            data = list(load_dataset(name)[split])
+        elif len(parts) == 3:
+            name, lang, split = parts
+            data = list(load_dataset(name, lang)[split])
+        else:
+            raise ValueError(f"Invalid prompt file format: {prompt_file}")
     else:
-        raise ValueError("No prompt file provided.")
+        data = list(load_dataset(prompt_file))
 
     # Set the seeds for reproducibility
     torch.cuda.manual_seed(seed)
