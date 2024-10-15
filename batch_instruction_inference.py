@@ -11,7 +11,7 @@ import json
 import torch
 from datasets import load_dataset
 
-from inference_datasets import EstQADataset, ChatDataset, InstructionDataset, SimpleDataset
+from inference_datasets import EstQADataset, ChatDataset, InstructionDataset, SimpleDataset, HFChatDataset
 import torch.distributed._shard.checkpoint as dist_cp
 from torch.distributed.checkpoint import FileSystemReader
 from tqdm import tqdm
@@ -161,6 +161,8 @@ def main(
         val_data = get_alpaca_dataset(task, data, alpaca_prompt_format_path=alpaca_prompt_format_path)
     elif input_format == "chat":
         val_data = ChatDataset(data, tokenizer)
+    elif input_format == "hfchat":
+        val_data = HFChatDataset(data, tokenizer)
     elif input_format == "simple":
         val_data = SimpleDataset(data, prompt_field="text")
     else:

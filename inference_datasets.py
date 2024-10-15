@@ -94,6 +94,26 @@ class ChatDataset(Dataset):
         return {"prompts": example_text}
 
 
+class HFChatDataset(Dataset):
+    def __init__(self, data, tokenizer):
+        self.dataset = data
+        self.tokenizer = tokenizer
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, index):
+        messages = self.dataset[index]["messages"]
+        if len(messages) == 0:
+            raise ValueError('messages field is empty.')
+
+        return {"prompts": self.tokenizer.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=False
+        )}
+
+
 class EstQADataset(InstructionDataset):
     def __getitem__(self, index):
         item = self.data[index]
