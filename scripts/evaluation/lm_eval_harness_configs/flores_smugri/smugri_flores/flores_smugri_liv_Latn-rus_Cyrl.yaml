@@ -1,0 +1,6 @@
+"dataset_name": "liv_Latn-rus_Cyrl"
+"doc_to_decontamination_query": "{{sentence_liv_Latn}}\t{{sentence_rus_Cyrl}}"
+"doc_to_target": "{{sentence_rus_Cyrl}}"
+"doc_to_text": "Livonian: {{sentence_liv_Latn}}\nRussian:"
+"include": "_default_template_yaml"
+"task": "flores_smugri_liv_Latn-rus_Cyrl"

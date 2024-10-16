@@ -1,0 +1,6 @@
+"dataset_name": "eng_Latn-liv_Latn"
+"doc_to_decontamination_query": "{{sentence_eng_Latn}}\t{{sentence_liv_Latn}}"
+"doc_to_target": "{{sentence_liv_Latn}}"
+"doc_to_text": "English: {{sentence_eng_Latn}}\nLivonian:"
+"include": "_default_template_yaml"
+"task": "flores_smugri_eng_Latn-liv_Latn"

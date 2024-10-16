@@ -1,0 +1,6 @@
+"dataset_name": "est_Latn-vro_Latn"
+"doc_to_decontamination_query": "{{sentence_est_Latn}}\t{{sentence_vro_Latn}}"
+"doc_to_target": "{{sentence_vro_Latn}}"
+"doc_to_text": "Estonian: {{sentence_est_Latn}}\nVõro:"
+"include": "_default_template_yaml"
+"task": "flores_smugri_est_Latn-vro_Latn"

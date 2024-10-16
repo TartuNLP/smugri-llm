@@ -1,0 +1,6 @@
+"dataset_name": "kpv_Cyrl-est_Latn"
+"doc_to_decontamination_query": "{{sentence_kpv_Cyrl}}\t{{sentence_est_Latn}}"
+"doc_to_target": "{{sentence_est_Latn}}"
+"doc_to_text": "Komi: {{sentence_kpv_Cyrl}}\nEstonian:"
+"include": "_default_template_yaml"
+"task": "flores_smugri_kpv_Cyrl-est_Latn"

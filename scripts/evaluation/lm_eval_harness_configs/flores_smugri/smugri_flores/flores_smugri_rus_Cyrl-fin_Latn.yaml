@@ -1,0 +1,6 @@
+"dataset_name": "rus_Cyrl-fin_Latn"
+"doc_to_decontamination_query": "{{sentence_rus_Cyrl}}\t{{sentence_fin_Latn}}"
+"doc_to_target": "{{sentence_fin_Latn}}"
+"doc_to_text": "Russian: {{sentence_rus_Cyrl}}\nFinnish:"
+"include": "_default_template_yaml"
+"task": "flores_smugri_rus_Cyrl-fin_Latn"
