@@ -1,0 +1,6 @@
+"dataset_name": "fin_Latn-eng_Latn"
+"doc_to_decontamination_query": "{{sentence_fin_Latn}}\t{{sentence_eng_Latn}}"
+"doc_to_target": "{{sentence_eng_Latn}}"
+"doc_to_text": "Finnish: {{sentence_fin_Latn}}\nEnglish:"
+"include": "_default_template_yaml"
+"task": "flores_smugri_fin_Latn-eng_Latn"

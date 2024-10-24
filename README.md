@@ -1,19 +1,23 @@
-# Llammas 🐑
-*Adapting Llama-2 to Estonian*
+# LLMs for Extremely Low-Resource Finno-Ugric Languages
+This repository contains the implementation used for training and evaluating language models for extremely low-resource Finno-Ugric languages.
 
-This repository contains the fine-tuning, inference and data formating scripts for fine-tuning and continued-pretraining of Llama-2 for Estonian.
+## Models
+Models will be added soon.
 
-The [scripts](./scripts) directory contains example scripts for:
-* [scripts/training](./scripts/training) for example training scripts.
-* [scripts/chat_data](./scripts/chat_data) for formating instructions into Estonian/English chat format.
-* [scripts/translation_data](./scripts/translation_data) for bitext creation and formating into Estonian/English instructions.
+## Evaluation
+Belebele-SMUGRI:
+* https://huggingface.co/datasets/tartuNLP/belebele-smugri
 
-For instructions used to train the model:
-* [Alpaca-est (ours)](https://github.com/TartuNLP/alpaca-est)
-* [Alpaca-cleaned](https://github.com/gururise/AlpacaDataCleaned)
-* [open-instruct](https://github.com/allenai/open-instruct)
+SIB-SMUGRI:
+* https://huggingface.co/datasets/tartuNLP/sib-smugri
 
-Trained model checkpoints:
-* [Llammas](https://huggingface.co/tartuNLP/Llammas) (conversational/instruction-tuned)
-* [Llammas-base](https://huggingface.co/tartuNLP/Llammas-base)
-* [Llammas-translate](https://huggingface.co/tartuNLP/Llammas-translate) (conversational/instruction-tuned with focus on translation)
+# Usage
+Scripts for launching training are provided in:
+* [scripts/training](scripts%2Ftraining)
+
+LM-eval-harness configurations:
+* [scripts/evaluation/lm_eval_harness_configs](scripts%2Fevaluation%2Flm_eval_harness_configs)
+
+## Acknowledgements
+The implementation is built on [github.com/TartuNLP/llammas](https://github.com/TartuNLP/llammas).
+

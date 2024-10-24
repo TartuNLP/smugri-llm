@@ -1,4 +1,10 @@
+import logging
+
 from torch.utils.data import Dataset
+
+from utils import read_json
+
+logger = logging.getLogger(__name__)
 
 PROMPT_DICT = {
     "prompt_input": (
@@ -13,9 +19,16 @@ PROMPT_DICT = {
     ),
 }
 
+
 class InstructionDataset(Dataset):
-    def __init__(self, data):
+    def __init__(self, data, prompt_format_path: str = None):
         self.data = data
+
+        self.prompt_format = PROMPT_DICT
+
+        if prompt_format_path is not None:
+            self.prompt_format = read_json(prompt_format_path)
+            logger.info(f"Prompt format loaded from {prompt_format_path}:\n{self.prompt_format}")
 
     def __len__(self):
         return len(self.data)
@@ -24,16 +37,25 @@ class InstructionDataset(Dataset):
         item = self.data[index]
 
         if item.get("input", "") == "":
-            prompt = PROMPT_DICT["prompt_no_input"].format_map(item)
+            prompt = self.prompt_format["prompt_no_input"].format_map(item)
         else:
-            prompt = PROMPT_DICT["prompt_input"].format_map(item)
+            prompt = self.prompt_format["prompt_input"].format_map(item)
 
-        if "output" not in item:
-            return {"prompts": prompt}
+        return {"prompts": prompt}
 
-        return {"prompts": prompt, "labels": item["output"]}
 
-        
+class SimpleDataset(Dataset):
+    def __init__(self, data, prompt_field: str = "text"):
+        self.data = data
+        self.prompt_field = prompt_field
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, index):
+        return {"prompts": self.data[index][self.prompt_field]}
+
+
 class ChatDataset(Dataset):
     SYSTEM_PREFIX = "<|system|>\n"
     SYSTEM_SUFFIX = "\n"
@@ -70,6 +92,26 @@ class ChatDataset(Dataset):
 
         example_text = self._concat_messages(messages) + self.ASSISTANT_PREFIX
         return {"prompts": example_text}
+
+
+class HFChatDataset(Dataset):
+    def __init__(self, data, tokenizer):
+        self.dataset = data
+        self.tokenizer = tokenizer
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, index):
+        messages = self.dataset[index]["messages"]
+        if len(messages) == 0:
+            raise ValueError('messages field is empty.')
+
+        return {"prompts": self.tokenizer.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=False
+        )}
 
 
 class EstQADataset(InstructionDataset):

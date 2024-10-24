@@ -1,290 +1,37 @@
 # Adapted from https://github.com/pacman100/DHS-LLM-Workshop/blob/main/chat_assistant/training/train.py
 # and https://github.com/facebookresearch/llama-recipes
-import copy
-import json
 import logging
 import math
 import os
 import random
 import sys
-import warnings
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Optional
+from typing import Optional, Tuple, Literal
 
+import datasets
 import torch
+from accelerate import PartialState
 from datasets import interleave_datasets, load_dataset
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, get_peft_model, PeftModel
 from peft.tuners.lora import LoraLayer
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
-from transformers import HfArgumentParser, TrainingArguments, Trainer, LlamaForCausalLM, LlamaTokenizer, \
-    default_data_collator, DataCollatorForSeq2Seq, get_polynomial_decay_schedule_with_warmup
-from torch.utils.data import Dataset, IterableDataset
+from transformers import HfArgumentParser, TrainingArguments, Trainer, AutoModelForCausalLM, AutoTokenizer, \
+    PreTrainedTokenizer, default_data_collator, DataCollatorForSeq2Seq, get_polynomial_decay_schedule_with_warmup, \
+    PreTrainedModel, TrainerCallback, TrainerControl, TrainerState
+
+from torch.utils.data import Dataset
 from transformers.utils import PaddingStrategy
 
-
-# implementation from TRL: https://github.com/huggingface/trl/blob/main/trl/trainer/utils.py
-class ConstantLengthDataset(IterableDataset):
-    """
-    Iterable dataset that returns constant length chunks of tokens from stream of text files.
-    The dataset also formats the text before tokenization with a specific format that is provided
-    by the user.
-
-        Args:
-            tokenizer (`transformers.PreTrainedTokenizer`):
-                The processor used for processing the data.
-            dataset (`dataset.Dataset`):
-                Dataset with text files.
-            dataset_text_field (`str`, **optional**):
-                Name of the field in the dataset that contains the text. Used only if `formatting_func` is `None`.
-            formatting_func (`Callable`, **optional**):
-                Function that formats the text before tokenization. Usually it is recommended to have follows a certain
-                pattern such as `"### Question: {question}\n ### Answer: {answer}\n"`
-            infinite (`bool`, *optional*, defaults to `False`):
-                If True the iterator is reset after dataset reaches end else stops.
-            seq_length (`int`, *optional*, defaults to `1024`):
-                Length of token sequences to return.
-            num_of_sequences (`int`, *optional*, defaults to `1024`):
-                Number of token sequences to keep in buffer.
-            chars_per_token (`int`, *optional*, defaults to `3.6`):
-                Number of characters per token used to estimate number of tokens in text buffer.
-            eos_token_id (`int`, *optional*, defaults to `0`):
-                Id of the end of sequence token if the passed tokenizer does not have an EOS token.
-            shuffle ('bool', *optional*, defaults to True)
-                Shuffle the examples before they are returned
-    """
-
-    def __init__(
-            self,
-            tokenizer,
-            dataset,
-            dataset_text_field=None,
-            formatting_func=None,
-            infinite=False,
-            seq_length=1024,
-            num_of_sequences=1024,
-            chars_per_token=3.6,
-            eos_token_id=0,
-            shuffle=True,
-    ):
-        self.tokenizer = tokenizer
-
-        if tokenizer.eos_token_id is None:
-            warnings.warn(
-                "The passed tokenizer does not have an EOS token. We will use the passed eos_token_id instead which corresponds"
-                f" to {eos_token_id}. If this is not the correct EOS token, make sure to pass the correct eos_token_id."
-            )
-
-        self.concat_token_id = tokenizer.eos_token_id if tokenizer.eos_token_id else eos_token_id
-        self.dataset = dataset
-        self.seq_length = seq_length
-        self.infinite = infinite
-        self.current_size = 0
-        self.max_buffer_size = seq_length * chars_per_token * num_of_sequences
-        self.shuffle = shuffle
-        if formatting_func is None:
-            self.formatting_func = lambda x: x[dataset_text_field]
-        else:
-            self.formatting_func = formatting_func
-
-        if formatting_func is not None:
-            formatting_func_signature = formatting_func.__code__.co_varnames
-            if len(formatting_func_signature) > 1:
-                warnings.warn(
-                    "The passed formatting_func has more than one argument. Usually that function should have a single argument `example`"
-                    " which corresponds to the dictionary returned by each element of the dataset. Make sure you know what you are doing."
-                )
-
-    def __len__(self):
-        return len(self.dataset)
-
-    def __iter__(self):
-        iterator = iter(self.dataset)
-        more_examples = True
-        while more_examples:
-            buffer, buffer_len = [], 0
-            while True:
-                if buffer_len >= self.max_buffer_size:
-                    break
-                try:
-                    buffer.append(self.formatting_func(next(iterator)))
-                    buffer_len += len(buffer[-1])
-                except StopIteration:
-                    if self.infinite:
-                        iterator = iter(self.dataset)
-                        warnings.warn("The dataset reached end and the iterator is reset to the start.")
-                    else:
-                        more_examples = False
-                        break
-            tokenized_inputs = self.tokenizer(buffer, truncation=False)["input_ids"]
-            all_token_ids = []
-            for tokenized_input in tokenized_inputs:
-                all_token_ids.extend(tokenized_input + [self.concat_token_id])
-            examples = []
-            for i in range(0, len(all_token_ids), self.seq_length):
-                input_ids = all_token_ids[i: i + self.seq_length]
-                if len(input_ids) == self.seq_length:
-                    examples.append(input_ids)
-            if self.shuffle:
-                random.shuffle(examples)
-            for example in examples:
-                self.current_size += 1
-                yield {
-                    "input_ids": torch.LongTensor(example),
-                    "labels": torch.LongTensor(example),
-                }
-
-
-PROMPT_DICT = {
-    "prompt_input": (
-        "Below is an instruction that describes a task, paired with an input that provides further context. "
-        "Write a response that appropriately completes the request.\n\n"
-        "### Instruction:\n{instruction}\n\n### Input:\n{input}\n\n### Response:\n"
-    ),
-    "prompt_no_input": (
-        "Below is an instruction that describes a task. "
-        "Write a response that appropriately completes the request.\n\n"
-        "### Instruction:\n{instruction}\n\n### Response:\n"
-    ),
-}
-
-
-def read_json(path: str):
-    with open(path, "r", encoding="utf-8") as user_file:
-        parsed_json = json.load(user_file)
-    return parsed_json
-
-
-class InstructionDataset(Dataset):
-    def __init__(self, data_path: str, tokenizer: LlamaTokenizer, padding=True):
-        self.dataset = read_json(data_path)
-        self.padding = padding
-        self.tokenizer = tokenizer
-
-    def __len__(self):
-        return len(self.dataset)
-
-    def __getitem__(self, index):
-        IGNORE_INDEX = -100
-        example_text = self.dataset[index]
-        if example_text.get("input", "") == "":
-            prompt = PROMPT_DICT["prompt_no_input"].format_map(example_text)
-        else:
-            prompt = PROMPT_DICT["prompt_input"].format_map(example_text)
-        example = prompt + example_text["output"]
-        prompt = torch.tensor(
-            self.tokenizer.encode(prompt, truncation=True), dtype=torch.int64
-        )
-        example = self.tokenizer.encode(example, truncation=True)
-        if len(example) < self.tokenizer.model_max_length:
-            example.append(self.tokenizer.eos_token_id)
-
-        example = torch.tensor(
-            example, dtype=torch.int64
-        )
-        padding = self.tokenizer.model_max_length - len(example)
-        if padding > 0 and self.padding:
-            example = torch.cat((example, torch.zeros(padding, dtype=torch.int64) - 1))
-
-        labels = copy.deepcopy(example)
-        labels[: len(prompt)] = -1
-        example_mask = example.ge(0)
-        label_mask = labels.ge(0)
-        example[~example_mask] = self.tokenizer.pad_token_id
-        labels[~label_mask] = IGNORE_INDEX
-        example_mask = example_mask.float()
-
-        return {
-            "input_ids": example,
-            "labels": labels,
-            "attention_mask": example_mask,
-        }
-
-
-class ChatDataset(Dataset):
-    SYSTEM_PREFIX = "<|system|>\n"
-    SYSTEM_SUFFIX = "\n"
-    ASSISTANT_PREFIX = "<|assistant|>\n"
-    ASSISTANT_SUFFIX = "\n"
-    USER_PREFIX = "<|user|>\n"
-    USER_SUFFIX = "\n"
-
-    def __init__(self, data_path: str, tokenizer: LlamaTokenizer):
-        self.dataset = read_json(data_path)
-        self.tokenizer = tokenizer
-
-    def __len__(self):
-        return len(self.dataset)
-
-    def _concat_messages(self, messages):
-        message_text = ""
-        for message in messages:
-            if message["role"] == "system":
-                message_text += self.SYSTEM_PREFIX + message["content"].strip() + self.SYSTEM_SUFFIX
-            elif message["role"] == "user":
-                message_text += self.USER_PREFIX + message["content"].strip() + self.USER_SUFFIX
-            elif message["role"] == "assistant":
-                message_text += self.ASSISTANT_PREFIX + message["content"].strip() + self.tokenizer.eos_token \
-                                + self.ASSISTANT_SUFFIX
-            else:
-                raise ValueError("Invalid role: {}".format(message["role"]))
-        return message_text
-
-    def __getitem__(self, index):
-        IGNORE_INDEX = -100
-
-        messages = self.dataset[index]["messages"]
-        if len(messages) == 0:
-            raise ValueError('messages field is empty.')
-
-        example_text = self._concat_messages(messages).strip()
-        tokenized_example = self.tokenizer(example_text, return_tensors='pt',
-                                           max_length=self.tokenizer.model_max_length, truncation=True)
-        input_ids = tokenized_example.input_ids
-        labels = input_ids.clone()
-
-        # mask the non-assistant part for avoiding loss
-        for message_idx, message in enumerate(messages):
-            if message["role"] != "assistant":
-                if message_idx == 0:
-                    message_start_idx = 0
-                else:
-                    message_start_idx = self.tokenizer(
-                        self._concat_messages(messages[:message_idx]),
-                        return_tensors='pt',
-                        max_length=self.tokenizer.model_max_length,
-                        truncation=True
-                    ).input_ids.shape[1]
-                if message_idx < len(messages) - 1 and messages[message_idx + 1]["role"] == "assistant":
-                    # here we also ignore the role of the assistant
-                    messages_so_far = self._concat_messages(messages[:message_idx + 1]) + self.ASSISTANT_PREFIX
-                else:
-                    messages_so_far = self._concat_messages(messages[:message_idx + 1])
-                message_end_idx = self.tokenizer(
-                    messages_so_far,
-                    return_tensors='pt',
-                    max_length=self.tokenizer.model_max_length,
-                    truncation=True
-                ).input_ids.shape[1]
-                labels[:, message_start_idx:message_end_idx] = IGNORE_INDEX
-
-                if message_end_idx >= self.tokenizer.model_max_length:
-                    break
-
-        attention_mask = torch.ones_like(input_ids)
-        return {
-            'input_ids': input_ids.flatten(),
-            'labels': labels.flatten(),
-            'attention_mask': attention_mask.flatten(),
-        }
+from training_datasets import InstructionDataset, ConstantLengthDataset, ChatDataset, PreTokenizedDataset
 
 
 @dataclass
 class ScriptArguments:
     train_path: str = field(metadata={"help": "Training data path"})
-    valid_path: str = field(metadata={"help": "Validation data path"})
+    valid_path: Optional[str] = field(metadata={"help": "Validation data path"}, default=None)
     train_dataset_type: str = field(
         default="alpaca",
         metadata={"help": "Training dataset type"}
@@ -293,6 +40,7 @@ class ScriptArguments:
         default="alpaca",
         metadata={"help": "Validation dataset type"}
     )
+    alpaca_prompt_format_path: Optional[str] = field(default=None)
     max_seq_length: Optional[int] = field(default=512)
     model_name: Optional[str] = field(
         default="meta-llama/Llama-2-7b-hf",
@@ -309,10 +57,19 @@ class ScriptArguments:
     interleave_probs: Optional[str] = field(default=None)
     torch_dtype: Optional[str] = field(default=None)
     low_cpu_mem_usage: bool = field(default=False)
+    use_flash_attention_2: bool = field(default=False)
+    save_final_model: bool = field(default=False)
+    wrap_dataset_with_hf: bool = field(default=False)
+    force_end_save_and_evaluate: bool = field(default=False)
+
 
 
 @dataclass
 class LoraArguments:
+    peft_name: Optional[str] = field(
+        default=None,
+        metadata={"help": "The pre-trained PEFT model name"}
+    )
     use_peft_lora: Optional[bool] = field(
         default=False,
         metadata={"help": "Enables PEFT LoRA for training."},
@@ -323,6 +80,10 @@ class LoraArguments:
     lora_target_modules: Optional[str] = field(
         default="q_proj,k_proj,v_proj,o_proj,down_proj,up_proj,gate_proj",
         metadata={"help": "comma separated list of target modules to apply LoRA layers to"},
+    )
+    lora_modules_to_save: Optional[str] = field(
+        default=None,
+        metadata={"help": "comma separated list of modules to save/train with LoRA"},
     )
 
 
@@ -355,7 +116,7 @@ class QuantizationArguments:
 
 
 # https://github.com/pacman100/DHS-LLM-Workshop/blob/main/chat_assistant/training/utils.py#L116C1-L125C43
-def get_chars_per_token(dataset: Dataset, tokenizer: LlamaTokenizer, data_column: str, nb_examples: int = 500):
+def get_chars_per_token(dataset: Dataset, tokenizer: PreTrainedTokenizer, data_column: str, nb_examples: int = 500):
     """
     Estimate the average number of characters per token in the dataset.
     """
@@ -368,12 +129,25 @@ def get_chars_per_token(dataset: Dataset, tokenizer: LlamaTokenizer, data_column
     return total_characters / total_tokens
 
 
-def create_dataset(tokenizer: LlamaTokenizer, args: ScriptArguments, dataset_type: str, path: str, seed: int):
+def create_dataset(
+        tokenizer: PreTrainedTokenizer,
+        args: ScriptArguments,
+        dataset_type: str,
+        path: str,
+        seed: int,
+        split: str = "train",
+        infinite_packed_dataset: bool = False,
+        interleave_stopping_strategy: Literal["first_exhausted", "all_exhausted"] = "all_exhausted",
+        packed_ds_shuffling: bool = True,
+        wrap_dataset_with_hf: bool = False,
+):
+    logging.info(f"Loading dataset from: {path}")
     if dataset_type == "alpaca":
         dataset = InstructionDataset(
             data_path=path,
             tokenizer=tokenizer,
             padding=not args.use_dynamic_padding and not args.disable_padding,
+            prompt_format_path=args.alpaca_prompt_format_path,
         )
     elif dataset_type == "culturax":
         dataset_paths = list(path.split(","))
@@ -384,9 +158,9 @@ def create_dataset(tokenizer: LlamaTokenizer, args: ScriptArguments, dataset_typ
             logging.info(f"Loading {ds_path}")
             if ":" in ds_path:
                 ds_name, lang = ds_path.split(":")
-                culturax_dataset = load_dataset(ds_name, language=lang, streaming=True, split="train")
+                culturax_dataset = load_dataset(ds_name, lang, streaming=True, split=split)
             else:
-                culturax_dataset = load_dataset(ds_path, streaming=True, split="train")
+                culturax_dataset = load_dataset(ds_path, streaming=True, split=split)
             culturax_datasets.append(culturax_dataset)
 
         if len(culturax_datasets) == 0:
@@ -403,11 +177,14 @@ def create_dataset(tokenizer: LlamaTokenizer, args: ScriptArguments, dataset_typ
 
             logging.info(f"Interleave probabilities: {interleave_probs}")
 
+            for ds_path, prob in zip(dataset_paths, interleave_probs):
+                logging.info(f"Sampling probability for {ds_path}: {prob}")
+
             raw_dataset = interleave_datasets(
                 culturax_datasets,
                 probabilities=interleave_probs,
                 seed=seed,
-                stopping_strategy="all_exhausted"
+                stopping_strategy=interleave_stopping_strategy
             )
 
         chars_per_token = get_chars_per_token(raw_dataset, tokenizer, "text")
@@ -415,11 +192,11 @@ def create_dataset(tokenizer: LlamaTokenizer, args: ScriptArguments, dataset_typ
         dataset = ConstantLengthDataset(
             tokenizer,
             raw_dataset,
-            infinite=True,
+            infinite=infinite_packed_dataset,
             seq_length=args.max_seq_length,
             chars_per_token=chars_per_token,
             dataset_text_field="text",
-            shuffle=True,
+            shuffle=packed_ds_shuffling,
         )
     elif dataset_type == "chat":
         if not args.use_dynamic_padding and not args.disable_padding:
@@ -429,21 +206,63 @@ def create_dataset(tokenizer: LlamaTokenizer, args: ScriptArguments, dataset_typ
         dataset = ChatDataset(
             data_path=path,
             tokenizer=tokenizer,
+            split=split,
+        )
+    elif dataset_type == "pretokenized":
+        dataset = PreTokenizedDataset(
+            path=path,
         )
     else:
         raise ValueError(f"Unknown dataset type: {dataset_type}")
 
+    if wrap_dataset_with_hf:
+        with PartialState().local_main_process_first():
+            def data_generator(ds_iterator):
+                yield from ds_iterator
+
+            dataset = datasets.Dataset.from_generator(
+                data_generator, gen_kwargs={"ds_iterator": dataset}
+            )
+
     return dataset
 
 
-def create_datasets(tokenizer: LlamaTokenizer, args: ScriptArguments):
-    train_dataset = create_dataset(tokenizer, args, args.train_dataset_type, args.train_path, seed=training_args.seed)
-    valid_dataset = create_dataset(tokenizer, args, args.valid_dataset_type, args.valid_path, seed=training_args.seed)
+def create_datasets(tokenizer: PreTrainedTokenizer, args: ScriptArguments):
+    train_dataset = create_dataset(
+        tokenizer, args, args.train_dataset_type, args.train_path, seed=training_args.seed, packed_ds_shuffling=True,
+        wrap_dataset_with_hf=args.wrap_dataset_with_hf
+    )
+    if args.valid_path is None:
+        return train_dataset, None
+
+    if "," in args.valid_path:
+        raw_valid_paths = args.valid_path.split(",")
+        if any(":" not in path for path in raw_valid_paths):
+            raise ValueError(
+                "Invalid valid path format, expected format: `dataset_name:path`"
+                " when multiple validation datasets are provided"
+            )
+
+        valid_dataset = {}
+        for path in raw_valid_paths:
+            ds_name, *ds_path = path.split(":")
+            ds_path = ":".join(ds_path)
+            if ds_name in valid_dataset:
+                raise ValueError(f"Duplicate dataset name: {ds_name}")
+            valid_dataset[ds_name] = create_dataset(
+                tokenizer, args, args.valid_dataset_type, ds_path, seed=training_args.seed, split="validation"
+            )
+
+    else:
+        valid_dataset = create_dataset(
+            tokenizer, args, args.valid_dataset_type, args.valid_path,
+            seed=training_args.seed, split="validation", infinite_packed_dataset=False, packed_ds_shuffling=False
+        )
     return train_dataset, valid_dataset
 
 
 def create_and_prepare_model(args: ScriptArguments, training_args: TrainingArguments, lora_args: LoraArguments,
-                             quant_args: QuantizationArguments):
+                             quant_args: QuantizationArguments) -> Tuple[PreTrainedModel, PreTrainedTokenizer]:
     device_map = None
     bnb_config = None
     load_in_8bit = quant_args.use_8bit_quantization
@@ -475,7 +294,13 @@ def create_and_prepare_model(args: ScriptArguments, training_args: TrainingArgum
     else:
         torch_dtype = getattr(torch, args.torch_dtype)
 
-    model = LlamaForCausalLM.from_pretrained(
+    model_kwargs = {}
+
+    if args.use_flash_attention_2:
+        logging.info("Using Flash Attention 2")
+        model_kwargs["attn_implementation"] = "flash_attention_2"
+
+    model = AutoModelForCausalLM.from_pretrained(
         args.model_name,
         torch_dtype=torch_dtype,
         load_in_8bit=load_in_8bit,
@@ -484,31 +309,41 @@ def create_and_prepare_model(args: ScriptArguments, training_args: TrainingArgum
         use_cache=not training_args.gradient_checkpointing,
         trust_remote_code=True,
         low_cpu_mem_usage=args.low_cpu_mem_usage,
+        **model_kwargs,
     )
 
-    peft_config = None
-    if lora_args.use_peft_lora:
+    if lora_args.use_peft_lora or lora_args.peft_name is not None:
         logging.info("Using PEFT LoRA")
-        peft_config = LoraConfig(
-            lora_alpha=lora_args.lora_alpha,
-            lora_dropout=lora_args.lora_dropout,
-            r=lora_args.lora_r,
-            bias="none",
-            task_type="CAUSAL_LM",
-            target_modules=lora_args.lora_target_modules.split(","),
-        )
         if training_args.gradient_checkpointing:
             model.gradient_checkpointing_enable()
 
-        model = get_peft_model(model, peft_config)
+        if lora_args.peft_name is not None:
+            logging.info(f"Loading pre-trained LoRA weights and congfig from {lora_args.peft_name}")
+            model = PeftModel.from_pretrained(model, lora_args.peft_name, is_trainable=True)
+        else:
+            peft_config = LoraConfig(
+                lora_alpha=lora_args.lora_alpha,
+                lora_dropout=lora_args.lora_dropout,
+                r=lora_args.lora_r,
+                bias="none",
+                task_type="CAUSAL_LM",
+                target_modules=lora_args.lora_target_modules.split(","),
+                modules_to_save=lora_args.lora_modules_to_save.split(",")
+            )
+            model = get_peft_model(model, peft_config)
         model.print_trainable_parameters()
 
-    tokenizer = LlamaTokenizer.from_pretrained(
+    tokenizer = AutoTokenizer.from_pretrained(
         args.model_name if args.tokenizer_name is None else args.tokenizer_name,
         model_max_length=args.max_seq_length,
         padding_side="right",
     )
+    if tokenizer.pad_token_id is not None:
+        logging.info(f"Tokenizer pad_token_id={tokenizer.pad_token_id}")
+        return model, tokenizer
+
     if args.use_new_pad_token:
+        logging.info("No pad token found, adding <pad> to vocabulary")
         tokenizer.add_special_tokens(
             {
                 "pad_token": "<pad>",
@@ -519,9 +354,10 @@ def create_and_prepare_model(args: ScriptArguments, training_args: TrainingArgum
         model.model.padding_idx = tokenizer.pad_token_id
         model.model.embed_tokens.padding_idx = tokenizer.pad_token_id
     else:
+        logging.info("No pad token found, using pad_token_id=0")
         tokenizer.pad_token_id = 0
 
-    return model, peft_config, tokenizer
+    return model, tokenizer
 
 
 def peft_module_casting_to_bf16(model, args: TrainingArguments):
@@ -540,6 +376,7 @@ def peft_module_casting_to_bf16(model, args: TrainingArguments):
 @dataclass
 class CustomTrainingArguments(TrainingArguments):
     scheduler_lr_end: float = None
+    disable_train_shuffle: bool = False
 
 
 def _get_cosine_schedule_with_warmup_lr_lambda(
@@ -605,6 +442,39 @@ class CustomTrainer(Trainer):
 
         return super().create_scheduler(num_training_steps, optimizer)
 
+    def _get_train_sampler(self) -> Optional[torch.utils.data.Sampler]:
+        if isinstance(self.args, CustomTrainingArguments) and self.args.disable_train_shuffle:
+            logging.info("Disabling training dataset shuffling")
+            return None
+        return super()._get_train_sampler()
+
+
+class EvaluateAndSaveEndCallback(TrainerCallback):
+    def on_step_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+        if state.global_step >= state.max_steps:
+            control.should_evaluate = True
+            control.should_save = True
+
+    def on_epoch_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+        control.should_evaluate = True
+        control.should_save = True
+
+
+def _log_dataset_info(ds, split):
+    if ds is None:
+        logging.info(f"No {split} dataset")
+    elif isinstance(ds, dict):
+        for k, v in ds.items():
+            try:
+                logging.info(f"Prepared {split} dataset {k} with {len(v)} examples")
+            except:
+                logging.info(f"Prepared {split} dataset {k} with unknown number of examples")
+    else:
+        try:
+            logging.info(f"Prepared {split} dataset with {len(ds)} examples")
+        except:
+            logging.info(f"Prepared {split} dataset with unknown number of examples")
+
 
 def main(script_args: ScriptArguments, training_args: TrainingArguments, quantization_args: QuantizationArguments,
          lora_args: LoraArguments):
@@ -612,7 +482,7 @@ def main(script_args: ScriptArguments, training_args: TrainingArguments, quantiz
     torch.manual_seed(training_args.seed)
     random.seed(training_args.seed)
 
-    model, peft_config, tokenizer = create_and_prepare_model(
+    model, tokenizer = create_and_prepare_model(
         script_args, training_args, lora_args, quantization_args
     )
     model.config.use_cache = False
@@ -631,19 +501,20 @@ def main(script_args: ScriptArguments, training_args: TrainingArguments, quantiz
         logging.info("Using max length padding to max_seq_length")
         collator = default_data_collator
 
-    try:
-        logging.info(f"Train dataset with {len(train_dataset)} examples")
-    except:
-        logging.info(f"Train dataset with unknown number of examples")
+    _log_dataset_info(train_dataset, "train")
+    _log_dataset_info(eval_dataset, "eval")
 
-    logging.info(f"Validation dataset with {len(eval_dataset)} examples")
     logging.info(f"Max sequence length: {tokenizer.model_max_length}")
+    trainer_kwargs = {}
+    if script_args.force_end_save_and_evaluate:
+        trainer_kwargs["callbacks"] = [EvaluateAndSaveEndCallback()]
     trainer = CustomTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=collator,
+        **trainer_kwargs,
     )
     trainer.accelerator.print(f"{trainer.model}")
     if lora_args.use_peft_lora:
@@ -655,7 +526,9 @@ def main(script_args: ScriptArguments, training_args: TrainingArguments, quantiz
     if trainer.is_fsdp_enabled:
         trainer.accelerator.state.fsdp_plugin.set_state_dict_type("FULL_STATE_DICT")
 
-    trainer.save_model(training_args.output_dir)
+    if script_args.save_final_model:
+        trainer.save_model(training_args.output_dir)
+        tokenizer.save_pretrained(training_args.output_dir)
 
 
 if __name__ == "__main__":

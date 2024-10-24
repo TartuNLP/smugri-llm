@@ -9,7 +9,9 @@ import sys
 import json
 
 import torch
-from inference_datasets import EstQADataset, ChatDataset, InstructionDataset
+from datasets import load_dataset
+
+from inference_datasets import EstQADataset, ChatDataset, InstructionDataset, SimpleDataset, HFChatDataset
 import torch.distributed._shard.checkpoint as dist_cp
 from torch.distributed.checkpoint import FileSystemReader
 from tqdm import tqdm
@@ -21,15 +23,18 @@ def write_json(instructions: List[Dict[str, str]], file_path: str):
         json.dump(instructions, f, indent=4, default=str)
 
 
-def get_dataLoader(task, data, batch_size):
+def get_alpaca_dataset(task, data, alpaca_prompt_format_path=None):
+
+    if task is None:
+        logging.info(f"Getting general dataloader for task {task}")
+        return InstructionDataset(data, prompt_format_path=alpaca_prompt_format_path)
     if task.lower() == "estqa":
         logging.info("Getting estQA dataloader")
-        val_data = EstQADataset(data)
-    else:
-        logging.info(f"Getting general dataloader for task {task}")
-        val_data = InstructionDataset(data)
+        if alpaca_prompt_format_path is not None:
+            raise NotImplementedError("Custom alpaca prompt not implemented for EstQA")
+        return EstQADataset(data)
 
-    return val_data
+    raise ValueError(f"Unknown task: '{task}'")
 
 def main(
         model_name: str,
@@ -38,6 +43,7 @@ def main(
         output_file: str = "results.txt",
         full_output_file: Optional[str] = None,
         input_format: str = "alpaca",
+        alpaca_prompt_format_path: Optional[str] = None,
         fp16: bool = False,
         bf16: bool = False,
         quantization: bool = False,
@@ -61,13 +67,24 @@ def main(
         **kwargs
 ):
     start = time.perf_counter()
-    if prompt_file is not None:
-        if not os.path.exists(prompt_file):
-            raise ValueError(f"Prompt file {prompt_file} does not exist.")
+    if prompt_file is None:
+        raise ValueError("No prompt file provided.")
+
+    if os.path.exists(prompt_file):
         with open(prompt_file, "r") as f:
             data = json.load(f)
+    elif ":" in prompt_file:
+        parts = prompt_file.split(":")
+        if len(parts) == 2:
+            name, split = parts
+            data = list(load_dataset(name)[split])
+        elif len(parts) == 3:
+            name, lang, split = parts
+            data = list(load_dataset(name, lang)[split])
+        else:
+            raise ValueError(f"Invalid prompt file format: {prompt_file}")
     else:
-        raise ValueError("No prompt file provided.")
+        data = list(load_dataset(prompt_file))
 
     # Set the seeds for reproducibility
     torch.cuda.manual_seed(seed)
@@ -92,7 +109,9 @@ def main(
                 load_in_8bit=quantization,
                 device_map="auto",
                 return_dict=True,
-                low_cpu_mem_usage=True)
+                low_cpu_mem_usage=True,
+                torch_dtype=torch.bfloat16 if bf16 else torch.float16 if fp16 else None
+            )
 
     else:
         logging.info("Loading sharded model")
@@ -139,9 +158,13 @@ def main(
     tokenizer.pad_token_id = 0
 
     if input_format == "alpaca":
-        val_data = get_dataLoader(task, data, batch_size)
+        val_data = get_alpaca_dataset(task, data, alpaca_prompt_format_path=alpaca_prompt_format_path)
     elif input_format == "chat":
         val_data = ChatDataset(data, tokenizer)
+    elif input_format == "hfchat":
+        val_data = HFChatDataset(data, tokenizer)
+    elif input_format == "simple":
+        val_data = SimpleDataset(data, prompt_field="text")
     else:
         raise ValueError(f"Invalid input format: {input_format}")
 
@@ -155,7 +178,7 @@ def main(
 
     full_output = []
     translations = []
-    with open(output_file, "w", encoding="utf-8") as f:
+    with open(output_file, "w", encoding="utf-8", buffering=1) as f:
         for data_batch in tqdm(val_dataloader):
             """
             We pad to the longest sequence in the batch and not truncate at all because we are confident
@@ -185,10 +208,10 @@ def main(
                 prediction = tokenizer.decode(output[len(batch["input_ids"][ix]):], skip_special_tokens=True)
                 raw_output = prediction
 
-                if("\n" in prediction):
-                    logging.debug(f"Found newline in prediction {ix}")
+                if "\n" in prediction:
+                    logging.info(f"Found newline in prediction {ix}")
 
-                prediction = prediction.replace("\n", " ").strip()
+                prediction = " ".join(map(str.strip, prediction.splitlines())).strip()
                 translations.append(prediction)
                 f.write(prediction + "\n")
 
@@ -197,7 +220,7 @@ def main(
                 if print_output:
                     logging.info(f"input-escaped-{ix}:\t{repr(data_batch['prompts'][ix])}")
                     logging.info(f"raw-output-escaped-{ix}:\t{repr(raw_output)}")
-                    logging.info(f"processed-output-{ix}: {prediction}")
+                    logging.info(f"processed-output-{ix}:\t{prediction}")
 
     if full_output_file is not None:
         write_json(full_output, full_output_file)
