@@ -2,8 +2,6 @@
 This repository contains the implementation used for training and evaluating language models for extremely low-resource Finno-Ugric languages.
 
 ## Models
-Models will be added soon.
-
 **Pre-trained**:
 * [tartuNLP/Llama-SMUGRI-7B](https://huggingface.co/tartuNLP/Llama-SMUGRI-7B)
 
